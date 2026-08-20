@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>El Viaje — Fase 1</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080914;touch-action:none}
+body{font-family:monospace}
+canvas{display:block;width:100vw;height:100vh;image-rendering:pixelated;image-rendering:crisp-edges}
+#pause{
+ position:fixed;right:max(10px,env(safe-area-inset-right));top:max(10px,env(safe-area-inset-top));
+ width:44px;height:44px;border:2px solid #fff;border-radius:9px;
+ background:rgba(8,9,18,.58);color:#fff;font:20px monospace;z-index:20
+}
+#controls{
+ position:fixed;left:0;right:0;bottom:max(10px,env(safe-area-inset-bottom));
+ display:flex;justify-content:space-between;padding:0 12px;z-index:20;pointer-events:none
+}
+.group{display:flex;gap:8px;pointer-events:auto}
+.btn{
+ width:clamp(52px,15vw,68px);height:clamp(52px,15vw,68px);
+ border:2px solid rgba(255,255,255,.86);border-radius:14px;
+ background:rgba(8,9,18,.58);color:white;font:28px monospace;
+ touch-action:none;user-select:none;-webkit-user-select:none
+}
+.btn:active{background:rgba(255,255,255,.22)}
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="540"></canvas>
+<button id="pause">Ⅱ</button>
+<div id="controls">
+  <div class="group"><button class="btn" id="left">◀</button><button class="btn" id="right">▶</button></div>
+  <div class="group"><button class="btn" id="attack">⚔</button><button class="btn" id="jump">▲</button></div>
+</div>
+
+<script>
+"use strict";
+const canvas=document.getElementById("game"),ctx=canvas.getContext("2d");
+const W=960,H=540;
+ctx.imageSmoothingEnabled=false;
+
+const img={};
+const files=[
+ "player_idle","player_walk","player_jump","player_attack","player_hurt",
+ "enemy_idle","enemy_walk","enemy_attack","enemy_hurt","enemy_death"
+];
+for(const n of files){img[n]=new Image();img[n].src="assets/"+n+".png";}
+img.bg=new Image();img.bg.src="assets/forest_panorama_clean.jpg";
+
+const input={left:false,right:false};
+let paused=false,clock=0,shake=0,area=-1,allFlowersShown=false;
+
+const world={w:5200,h:540};
+const cam={x:0};
+
+const solids=[
+ {x:0,y:472,w:650,h:68},{x:720,y:472,w:510,h:68},{x:1300,y:472,w:690,h:68},
+ {x:2070,y:472,w:590,h:68},{x:2740,y:472,w:700,h:68},{x:3520,y:472,w:760,h:68},
+ {x:4360,y:472,w:840,h:68},
+ {x:235,y:390,w:165,h:16},{x:500,y:336,w:155,h:16},{x:805,y:382,w:175,h:16},
+ {x:1050,y:312,w:180,h:16},{x:1395,y:372,w:170,h:16},{x:1675,y:312,w:175,h:16},
+ {x:2135,y:382,w:170,h:16},{x:2395,y:322,w:185,h:16},{x:2865,y:382,w:175,h:16},
+ {x:3155,y:317,w:185,h:16},{x:3655,y:379,w:175,h:16},{x:3945,y:317,w:185,h:16},
+ {x:4515,y:377,w:185,h:16},{x:4785,y:312,w:185,h:16},
+ {x:650,y:342,w:70,h:130},{x:1230,y:350,w:70,h:122},{x:1995,y:337,w:75,h:135},
+ {x:2660,y:350,w:80,h:122},{x:3440,y:337,w:80,h:135},{x:4280,y:350,w:80,h:122}
+];
+
+const flowers=[
+ {x:305,y:346,t:"Desde que llegaste, mis días comenzaron a sentirse diferentes."},
+ {x:555,y:292,t:"Hay recuerdos pequeños que terminan significando muchísimo."},
+ {x:880,y:338,t:"A veces el camino más bonito es el que recorremos juntos."},
+ {x:1110,y:268,t:"No importa cuánto falte: quiero seguir avanzando contigo."},
+ {x:1460,y:328,t:"Si encuentras esta flor, recuerda que todavía quedan muchos momentos por vivir."},
+ {x:1740,y:268,t:"Cada paso que das te acerca un poquito más al final."},
+ {x:2450,y:278,t:"Y si alguna vez te pierdes, busca las pequeñas luces."},
+ {x:3225,y:270,t:"La última flor no es el final... es la puerta hacia algo más. ❤️"}
+].map(x=>({...x,taken:false}));
+
+function enemy(x,y,l,r,s,hp){return{
+ x,y,w:44,h:42,left:l,right:r,speed:s,hp,maxHp:hp,dir:1,
+ state:"walk",frame:0,t:0,hit:0,knock:0,kx:0,attackCd:80,attackTimer:0,dead:0
+}}
+const enemies=[
+ enemy(770,430,730,950,1.1,45),enemy(1370,430,1320,1570,1.2,55),
+ enemy(1800,430,1610,1930,1.15,60),enemy(2180,430,2110,2580,1.3,65),
+ enemy(2910,430,2780,3340,1.4,70),enemy(3650,430,3540,4050,1.25,80),
+ enemy(4470,430,4390,4770,1.3,85)
+];
+const boss={x:4870,y:401,w:52,h:58,left:4620,right:5090,dir:-1,speed:1,
+ hp:220,maxHp:220,attackCd:90,attackTimer:0,hit:0,knock:0,kx:0,alive:true,frame:0,t:0};
+
+const player={
+ x:100,y:404,w:34,h:64,vy:0,speed:4.6,jump:-13,ground:false,dir:1,
+ state:"idle",frame:0,t:0,attackTimer:0,hp:100,maxHp:100,inv:0,knock:0,kx:0,hearts:3
+};
+let checkpoint=100;
+
+function box(a){return{x:a.x,y:a.y,w:a.w,h:a.h}}
+function hit(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y}
+function attackBox(){
+ return {x:player.dir>0?player.x+18:player.x-58,y:player.y+12,w:58,h:42}
+}
+function moveX(o,dx){
+ const old=o.x;o.x+=dx;
+ for(const p of solids){
+   if(o.y+o.h>p.y&&o.y<p.y+p.h){
+     if(o.x+o.w>p.x&&old+o.w<=p.x)o.x=p.x-o.w;
+     if(o.x<p.x+p.w&&old>=p.x+p.w)o.x=p.x+p.w;
+   }
+ }
+}
+function moveY(o){
+ const old=o.y;o.vy+=.62;o.y+=o.vy;o.ground=false;
+ for(const p of solids){
+   if(o.x+o.w>p.x&&o.x<p.x+p.w){
+     if(old+o.h<=p.y&&o.y+o.h>=p.y){o.y=p.y-o.h;o.vy=0;o.ground=true}
+     if(old>=p.y+p.h&&o.y<=p.y+p.h){o.y=p.y+p.h;o.vy=0}
+   }
+ }
+}
+function jump(){if(!paused&&player.ground){player.vy=player.jump;player.ground=false}}
+function attack(){if(!paused&&!player.attackTimer&&!player.inv){player.attackTimer=22}}
+function hurt(amount,sx){
+ if(player.inv)return;
+ player.hp=Math.max(0,player.hp-amount);player.inv=70;player.knock=14;player.kx=player.x<sx?-6.5:6.5;player.vy=-6;shake=7;
+ if(player.hp<=0){player.x=checkpoint;player.y=404;player.vy=0;player.hp=100;player.inv=100;player.hearts--;if(player.hearts<1)player.hearts=3}
+}
+function enemyHit(e){
+ if(e.dead||e.hit||!player.attackTimer)return;
+ if(hit(attackBox(),e)){e.hp=Math.max(0,e.hp-20);e.hit=12;e.knock=13;e.kx=player.dir*6.5;shake=4;
+  if(e.hp<=0)e.dead=30;
+ }
+}
+function updateEnemy(e){
+ if(e.dead){e.dead--;return}
+ if(e.hit)e.hit--;
+ if(e.knock){e.x+=e.kx;e.kx*=.82;e.knock--;return}
+ const dx=player.x-e.x;
+ if(Math.abs(dx)<200&&Math.abs(player.y-e.y)<90){
+   e.dir=dx<0?-1:1;
+   if(e.attackCd<=0){e.state="attack";e.attackTimer=30;e.attackCd=100}
+ }else{e.state="walk";e.x+=e.dir*e.speed;if(e.x<e.left){e.x=e.left;e.dir=1}if(e.x>e.right){e.x=e.right;e.dir=-1}}
+ if(e.attackCd)e.attackCd--;
+ if(e.attackTimer){e.attackTimer--;if(e.attackTimer===9){const b={x:e.dir>0?e.x+25:e.x-34,y:e.y+5,w:34,h:45};if(hit(player,b))hurt(10,e.x)}}
+ enemyHit(e);animate(e);
+}
+function updateBoss(){
+ if(!boss.alive)return;
+ if(boss.hit)boss.hit--;
+ if(boss.knock){boss.x+=boss.kx;boss.kx*=.84;boss.knock--;return}
+ const dx=player.x-boss.x;boss.dir=dx<0?-1:1;
+ if(Math.abs(dx)<370){
+   if(boss.attackCd<=0){boss.attackTimer=40;boss.attackCd=115}
+   else boss.x+=boss.dir*boss.speed;
+ }else boss.x+=boss.dir*boss.speed;
+ boss.x=Math.max(boss.left,Math.min(boss.right,boss.x));
+ if(boss.attackCd)boss.attackCd--;
+ if(boss.attackTimer){boss.attackTimer--;if(boss.attackTimer===12){const b={x:boss.dir>0?boss.x+35:boss.x-48,y:boss.y+5,w:48,h:55};if(hit(player,b))hurt(18,boss.x)}}
+ if(player.attackTimer&&!boss.hit&&hit(attackBox(),boss)){boss.hp=Math.max(0,boss.hp-15);boss.hit=12;boss.knock=11;boss.kx=player.dir*5;if(boss.hp<=0)boss.alive=false}
+ animate(boss);
+}
+function animate(o){
+ const n=o.state==="attack"?4:(o.dead?4:6);
+ if(++o.t>=8){o.t=0;o.frame=(o.frame+1)%n}
+}
+function updatePlayer(){
+ if(player.knock){moveX(player,player.kx);player.kx*=.8;player.knock--}
+ else{const m=(input.right?1:0)-(input.left?1:0);moveX(player,m*player.speed);if(m)player.dir=m}
+ moveY(player);player.x=Math.max(0,Math.min(world.w-player.w,player.x));
+ if(player.inv)player.inv--;
+ if(player.attackTimer)player.attackTimer--;
+ player.state=player.attackTimer?"attack":!player.ground?(player.vy<0?"jump":"fall"):(input.left||input.right?"walk":player.inv?"hurt":"idle");
+ const counts={idle:4,walk:6,jump:4,fall:4,attack:4,hurt:4};
+ if(++player.t>=7){player.t=0;player.frame=(player.frame+1)%counts[player.state]}
+ for(const c of [100,1300,2740,3520,4360])if(player.x>=c)checkpoint=c;
+ cam.x=Math.max(0,Math.min(world.w-W,player.x-W*.42));
+ const a=Math.min(5,Math.floor(player.x/900));if(a!==area){area=a;flashArea(["Bosque de entrada","Arboleda","Ruinas","Cascada","Camino del Guardián","Santuario"][a])}
+}
+let areaText="",areaTimer=0;
+function flashArea(t){areaText=t;areaTimer=110}
+let flowerTimer=0;
+function flowersUpdate(){
+ for(const f of flowers)if(!f.taken&&hit(player,{x:f.x,y:f.y,w:28,h:40})){f.taken=true;flowerTimer=150}
+ if(!allFlowersShown&&flowers.every(f=>f.taken)){allFlowersShown=true;setTimeout(showFlowers,500)}
+}
+function showFlowers(){
+ const lines=flowers.map(f=>f.t).join("\n\n");
+ alert("🌸 Todas las flores\n\n"+lines);
+}
+function drawBg(){
+ ctx.fillStyle="#090b18";ctx.fillRect(0,0,W,H);
+ if(img.bg.complete){
+   // Un solo paisaje. No se mezclan las capas antiguas con etiquetas.
+   ctx.drawImage(img.bg,0,145,world.w,327);
+ }
+ // Dark lower gradient to visually connect terrain.
+ const g=ctx.createLinearGradient(0,330,0,H);g.addColorStop(0,"rgba(6,8,17,0)");g.addColorStop(1,"rgba(5,6,13,.45)");
+ ctx.fillStyle=g;ctx.fillRect(0,300,W,H-300);
+}
+function drawTerrain(){
+ for(const p of solids){
+   const x=p.x-cam.x;if(x>W+20||x+p.w<-20)continue;
+   ctx.fillStyle="#252438";ctx.fillRect(x,p.y,p.w,p.h);
+   ctx.fillStyle="#61704e";ctx.fillRect(x,p.y,p.w,6);
+   ctx.fillStyle="#393548";
+   for(let xx=x+5;xx<x+p.w-3;xx+=30)ctx.fillRect(xx,p.y+11,23,Math.max(8,p.h-11));
+ }
+}
+function drawFlower(f){
+ if(f.taken)return;
+ const x=f.x-cam.x,y=f.y, s=1+Math.sin(clock*.08+f.x)*.08;
+ ctx.fillStyle="rgba(239,154,255,.12)";ctx.beginPath();ctx.arc(x+14,y+18,22,0,Math.PI*2);ctx.fill();
+ ctx.fillStyle="#55915b";ctx.fillRect(x+12,y+18,4,25);
+ ctx.fillStyle="#eda0ff";
+ for(const [a,b] of [[14,10],[7,18],[21,18],[14,26]]){ctx.beginPath();ctx.arc(x+a,y+b,6*s,0,Math.PI*2);ctx.fill()}
+ ctx.fillStyle="#ffe18a";ctx.fillRect(x+11,y+15,7,7);
+}
+function sheet(im,n,frame,x,y,w,h,flip){
+ if(!im.complete)return;
+ ctx.save();
+ if(flip){ctx.translate(x+w,y);ctx.scale(-1,1);ctx.drawImage(im,frame*96,0,96,120,0,0,w,h)}
+ else ctx.drawImage(im,frame*96,0,96,120,x,y,w,h);
+ ctx.restore();
+}
+function drawPlayer(){
+ if(player.inv&&Math.floor(player.inv/5)%2===0)return;
+ const names={idle:"player_idle",walk:"player_walk",jump:"player_jump",fall:"player_jump",attack:"player_attack",hurt:"player_hurt"};
+ const n=names[player.state]||"player_idle";
+ sheet(img[n],0,player.frame,player.x-cam.x-28,player.y-96,78,96,player.dir<0);
+ if(player.attackTimer){
+   ctx.strokeStyle="rgba(245,208,255,.9)";ctx.lineWidth=4;
+   ctx.beginPath();ctx.arc(player.x-cam.x+(player.dir>0?28:-28),player.y+31,31,player.dir>0?-1:Math.PI,player.dir>0?1:Math.PI*2);ctx.stroke()
+ }
+}
+function drawEnemy(e,big=false){
+ if(e.dead===0)return;
+ if(e.dead>0&&e.dead<2)return;
+ const n=e.dead?"enemy_death":e.state==="attack"?"enemy_attack":"enemy_walk";
+ const dw=big?88:70,dh=big?110:88;
+ sheet(img[n],0,e.frame,e.x-cam.x-(dw-e.w)/2,e.y+e.h-dh,dw,dh,e.dir<0);
+ if(!big&&e.hp>0){ctx.fillStyle="#17131f";ctx.fillRect(e.x-cam.x,e.y-10,e.w,5);ctx.fillStyle="#d95878";ctx.fillRect(e.x-cam.x,e.y-10,e.w*e.hp/e.maxHp,5)}
+}
+function drawHud(){
+ // Compact HUD rendered in the game canvas so it scales perfectly with the 16:9 viewport.
+ const x=18,y=16;
+ ctx.fillStyle="rgba(8,9,18,.48)";ctx.fillRect(x-7,y-7,210,79);
+ ctx.font="20px monospace";ctx.fillStyle="#fff";ctx.fillText("❤".repeat(player.hearts),x,y+19);
+ ctx.fillStyle="#171521";ctx.fillRect(x,y+27,178,11);ctx.strokeStyle="#fff";ctx.strokeRect(x,y+27,178,11);
+ ctx.fillStyle="#df5278";ctx.fillRect(x+2,y+29,174*(player.hp/player.maxHp),7);
+ ctx.font="16px monospace";ctx.fillStyle="#fff";ctx.fillText("🌸 "+flowers.filter(f=>f.taken).length+"/8",x,y+60);
+ if(boss.alive&&Math.abs(player.x-boss.x)<650){
+   const bw=340,bx=(W-bw)/2;
+   ctx.font="13px monospace";ctx.textAlign="center";ctx.fillText("ESPÍRITU GUARDIÁN",W/2,18);
+   ctx.fillStyle="#181321";ctx.fillRect(bx,24,bw,11);ctx.strokeStyle="#fff";ctx.strokeRect(bx,24,bw,11);
+   ctx.fillStyle="#bd61e8";ctx.fillRect(bx+2,26,(bw-4)*boss.hp/boss.maxHp,7);ctx.textAlign="left";
+ }
+ if(areaTimer>0){ctx.globalAlpha=Math.min(1,areaTimer/25);ctx.font="18px monospace";ctx.textAlign="center";ctx.fillStyle="#fff";ctx.fillText(areaText,W/2,85);ctx.textAlign="left";ctx.globalAlpha=1;areaTimer--}
+ if(flowerTimer>0){
+   ctx.fillStyle="rgba(8,9,18,.9)";ctx.fillRect(180,H-88,W-360,55);
+   ctx.strokeStyle="#dcb6ef";ctx.strokeRect(180,H-88,W-360,55);
+   ctx.font="15px monospace";ctx.textAlign="center";ctx.fillStyle="#fff";
+   ctx.fillText("🌸 Una flor guardó un recuerdo para ti.",W/2,H-56);ctx.textAlign="left";flowerTimer--
+ }
+}
+function drawDoor(){
+ const x=5110-cam.x;if(x<-100||x>W+100)return;
+ ctx.fillStyle="#171322";ctx.fillRect(x,394,48,78);ctx.strokeStyle="#c79ae3";ctx.lineWidth=3;ctx.strokeRect(x,394,48,78);
+ ctx.fillStyle="#f1c9ff";ctx.beginPath();ctx.arc(x+36,434,4,0,Math.PI*2);ctx.fill();
+}
+function draw(){
+ ctx.save();
+ if(shake>.2){ctx.translate((Math.random()-.5)*shake,(Math.random()-.5)*shake);shake*=.82}
+ drawBg();drawTerrain();
+ flowers.forEach(drawFlower);drawDoor();
+ for(const e of enemies)drawEnemy(e,false);
+ if(boss.alive)drawEnemy(boss,true);
+ drawPlayer();drawHud();
+ ctx.restore();
+}
+function update(){
+ if(paused)return;
+ clock++;
+ updatePlayer();flowersUpdate();
+ for(const e of enemies)updateEnemy(e);
+ updateBoss();
+ if(!boss.alive&&hit(player,{x:5110,y:390,w:60,h:90}))alert("🌙 Fase 1 completada.\n\nEl camino hacia la siguiente parte está abierto. ❤️");
+}
+function loop(){update();draw();requestAnimationFrame(loop)}
+
+addEventListener("keydown",e=>{
+ const k=e.key.toLowerCase();
+ if(k==="a"||e.key==="ArrowLeft")input.left=true;
+ if(k==="d"||e.key==="ArrowRight")input.right=true;
+ if(k==="w"||e.key==="ArrowUp"||e.key===" ")jump();
+ if(k==="j"||k==="z")attack();
+ if(k==="escape")paused=!paused;
+});
+addEventListener("keyup",e=>{
+ const k=e.key.toLowerCase();
+ if(k==="a"||e.key==="ArrowLeft")input.left=false;
+ if(k==="d"||e.key==="ArrowRight")input.right=false;
+});
+function hold(id,on,off){
+ const b=document.getElementById(id);
+ b.addEventListener("touchstart",e=>{e.preventDefault();on()},{passive:false});
+ b.addEventListener("touchend",e=>{e.preventDefault();off()},{passive:false});
+ b.addEventListener("touchcancel",off);
+ b.addEventListener("mousedown",on);b.addEventListener("mouseup",off);b.addEventListener("mouseleave",off);
+}
+hold("left",()=>input.left=true,()=>input.left=false);
+hold("right",()=>input.right=true,()=>input.right=false);
+document.getElementById("jump").addEventListener("touchstart",e=>{e.preventDefault();jump()},{passive:false});
+document.getElementById("jump").addEventListener("mousedown",jump);
+document.getElementById("attack").addEventListener("touchstart",e=>{e.preventDefault();attack()},{passive:false});
+document.getElementById("attack").addEventListener("mousedown",attack);
+document.getElementById("pause").onclick=()=>paused=!paused;
+
+loop();
+</script>
+</body>
+</html>
